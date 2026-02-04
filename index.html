@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<title>Spacing Trainer 2D - Ahri Dodge</title>
+<style>
+  body {
+    margin: 0;
+    background: #111;
+    overflow: hidden;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    user-select: none;
+    color: white;
+  }
+  canvas {
+    display: block;
+  }
+  #ui {
+    position: absolute;
+    top: 20px;
+    left: 0;
+    width: 100%;
+    text-align: center;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .key {
+    background: #333;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid #555;
+    font-weight: bold;
+    font-family: monospace;
+    color: #ffd700;
+  }
+  #game-over {
+    display: none;
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(20, 20, 20, 0.95);
+    padding: 40px;
+    border: 2px solid #555;
+    border-radius: 12px;
+    text-align: center;
+    z-index: 20;
+    box-shadow: 0 0 30px rgba(0,0,0,0.8);
+  }
+  button {
+    background: #444;
+    color: white;
+    border: 1px solid #666;
+    padding: 10px 20px;
+    font-size: 16px;
+    cursor: pointer;
+    border-radius: 4px;
+    margin-top: 15px;
+    transition: 0.2s;
+  }
+  button:hover {
+    background: #666;
+  }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <h1 style="margin: 0; font-size: 24px; text-shadow: 0 0 10px #000;">SPACING & DODGE TRAINER</h1>
+  <div style="margin-top: 10px; font-size: 16px;">
+    Hareket: <span class="key">Sağ Tık</span>
+    &nbsp;|&nbsp; 
+    Atış (Skillshot): <span class="key">Q</span>
+    &nbsp;|&nbsp; 
+    Amaç: <span style="color: #f44">Ahri Q'sundan kaç</span> ve <span style="color: #fd0">Farmları Kes</span>
+  </div>
+  <div id="score-display" style="margin-top: 15px; font-size: 20px; color: #8cf;">Skor (Farm): 0</div>
+</div>
+
+<div id="game-over">
+  <h2 id="go-title" style="margin-top: 0; color: #f44;">KAYBETTİN</h2>
+  <p id="go-reason" style="font-size: 18px; color: #ccc;">Sebep...</p>
+  <p id="go-score" style="font-size: 20px; color: #8cf; font-weight: bold;">Skor: 0</p>
+  <button onclick="resetGame()">Tekrar Dene (SPACE)</button>
+</div>
+
+<canvas id="game"></canvas>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+// ---------------- AYARLAR ----------------
+const ARENA_RADIUS = 350;
+const PLAYER_SPEED = 4.5;
+const PLAYER_RADIUS = 15;
+const ENEMY_RADIUS = 25;
+const MINION_RADIUS = 12;
+
+// Ahri Q Ayarları
+const ORB_SPEED_OUT = 9;
+const ORB_SPEED_RET = 9;
+const ORB_MAX_DIST = 550;
+const ORB_RADIUS = 20;
+
+// Player Q Ayarları
+const MISSILE_SPEED = 12;
+const MISSILE_RADIUS = 6;
+const MISSILE_RANGE = 600;
+
+// ---------------- STATE ----------------
+let cw, ch;
+let centerX, centerY;
+let mouseX = 0, mouseY = 0;
+
+let gameState = "playing"; // playing, gameover
+let score = 0;
+let frameCount = 0;
+
+let player = {
+    x: 0, y: 0,
+    tx: 0, ty: 0, // Target x, y
+    angle: 0
+};
+
+let enemy = {
+    x: 0, y: 0,
+    angle: -Math.PI / 2, // Top of circle
+    moveDir: 1,
+    moveSpeed: 0.015, // Radyan/frame
+    attackTimer: 0
+};
+
+let minions = [];
+let enemyProjectiles = []; // Ahri Q'ları
+let playerProjectiles = []; // Bizim Q'lar
+
+// ---------------- GİRİŞ SİSTEMİ ----------------
+window.addEventListener("resize", resize);
+window.addEventListener("mousemove", e => {
+    mouseX = e.clientX;
+    mouseY = e.clientY;
+});
+
+window.addEventListener("mousedown", e => {
+    if (gameState !== "playing") return;
+    
+    // Sağ Tık (Hareket)
+    if (e.button === 2) {
+        player.tx = e.clientX;
+        player.ty = e.clientY;
+    }
+});
+
+// Sağ tık menüsünü engelle
+window.addEventListener("contextmenu", e => e.preventDefault());
+
+window.addEventListener("keydown", e => {
+    if (gameState === "gameover" && e.code === "Space") {
+        resetGame();
+        return;
+    }
+    
+    if (gameState !== "playing") return;
+
+    // Q Tuşu (Skillshot)
+    if (e.key.toLowerCase() === 'q') {
+        castQ();
+    }
+});
+
+function resize() {
+    cw = canvas.width = window.innerWidth;
+    ch = canvas.height = window.innerHeight;
+    centerX = cw / 2;
+    centerY = ch / 2;
+    
+    // İlk açılışta veya resize'da merkeze al
+    if (frameCount === 0) resetGame();
+}
+
+function resetGame() {
+    gameState = "playing";
+    score = 0;
+    frameCount = 0;
+    document.getElementById("game-over").style.display = "none";
+    document.getElementById("score-display").innerText = "Skor (Farm): 0";
+
+    // Player Başlangıç (Alt taraf)
+    player.x = centerX;
+    player.y = centerY + 200;
+    player.tx = player.x;
+    player.ty = player.y;
+
+    // Enemy Başlangıç (Üst taraf - Daire üzerinde)
+    enemy.angle = -Math.PI / 2; // -90 derece (Tepe)
+    updateEnemyPos();
+
+    minions = [];
+    enemyProjectiles = [];
+    playerProjectiles = [];
+}
+
+function updateEnemyPos() {
+    // Dairenin biraz içinde dursun
+    const r = ARENA_RADIUS - 40; 
+    enemy.x = centerX + Math.cos(enemy.angle) * r;
+    enemy.y = centerY + Math.sin(enemy.angle) * r;
+}
+
+// ---------------- OYUN MANTIĞI ----------------
+
+function castQ() {
+    // Mouse yönüne atış
+    const angle = Math.atan2(mouseY - player.y, mouseX - player.x);
+    playerProjectiles.push({
+        x: player.x,
+        y: player.y,
+        vx: Math.cos(angle) * MISSILE_SPEED,
+        vy: Math.sin(angle) * MISSILE_SPEED,
+        distTraveled: 0,
+        active: true
+    });
+}
+
+function spawnMinion() {
+    // Arena içinde rastgele nokta bul
+    // Ama oyuncuya veya rakibe çok yakın olmasın
+    let valid = false;
+    let mx, my;
+    let tries = 0;
+    
+    while (!valid && tries < 10) {
+        const a = Math.random() * Math.PI * 2;
+        // Merkeze daha yakın olsun genellikle
+        const r = Math.random() * (ARENA_RADIUS - 60);
+        mx = centerX + Math.cos(a) * r;
+        my = centerY + Math.sin(a) * r;
+        
+        const dPlayer = Math.hypot(mx - player.x, my - player.y);
+        const dEnemy = Math.hypot(mx - enemy.x, my - enemy.y);
+        
+        if (dPlayer > 100 && dEnemy > 100) valid = true;
+        tries++;
+    }
+    
+    if (valid) {
+        minions.push({
+            x: mx, y: my,
+            hp: 1,
+            maxHp: 1,
+            radius: MINION_RADIUS,
+            spawnTime: frameCount
+        });
+    }
+}
+
+function spawnEnemyAttack() {
+    // Ahri Q: Oyuncunun olduğu yere at, geri dönsün
+    const angle = Math.atan2(player.y - enemy.y, player.x - enemy.x);
+    
+    enemyProjectiles.push({
+        x: enemy.x,
+        y: enemy.y,
+        startX: enemy.x,
+        startY: enemy.y,
+        angle: angle,
+        speed: ORB_SPEED_OUT,
+        state: "out", // out, return
+        dist: 0,
+        maxDist: ORB_MAX_DIST,
+        returnTarget: enemy // Dönüşte kime gidecek
+    });
+}
+
+function update() {
+    if (gameState !== "playing") return;
+    
+    frameCount++;
+
+    // 1. OYUNCU HAREKETİ
+    const dtx = player.tx - player.x;
+    const dty = player.ty - player.y;
+    const distToTarget = Math.hypot(dtx, dty);
+    
+    if (distToTarget > PLAYER_SPEED) {
+        const angle = Math.atan2(dty, dtx);
+        player.x += Math.cos(angle) * PLAYER_SPEED;
+        player.y += Math.sin(angle) * PLAYER_SPEED;
+    } else {
+        player.x = player.tx;
+        player.y = player.ty;
+    }
+
+    // Arena Sınırları (Clamp)
+    const distFromCenter = Math.hypot(player.x - centerX, player.y - centerY);
+    if (distFromCenter > ARENA_RADIUS - PLAYER_RADIUS) {
+        const angle = Math.atan2(player.y - centerY, player.x - centerX);
+        player.x = centerX + Math.cos(angle) * (ARENA_RADIUS - PLAYER_RADIUS);
+        player.y = centerY + Math.sin(angle) * (ARENA_RADIUS - PLAYER_RADIUS);
+    }
+
+    // 2. RAKİP YAPAY ZEKASI (Gelişmiş)
+    // Sadece üst yarım dairede (veya geniş bir yayda) sağ sol yapsın
+    // -PI (Sol) ile 0 (Sağ) arasında gidip gelsin
+    const MAX_ANGLE = -0.2; 
+    const MIN_ANGLE = -Math.PI + 0.2;
+    
+    enemy.angle += enemy.moveSpeed * enemy.moveDir;
+    
+    if (enemy.angle > MAX_ANGLE) {
+        enemy.angle = MAX_ANGLE;
+        enemy.moveDir = -1;
+    } else if (enemy.angle < MIN_ANGLE) {
+        enemy.angle = MIN_ANGLE;
+        enemy.moveDir = 1;
+    }
+    
+    updateEnemyPos();
+
+    // Rakip Saldırısı
+    if (enemy.attackTimer <= 0) {
+        spawnEnemyAttack();
+        // Rastgele bekleme süresi (1.5 - 3 saniye arası)
+        enemy.attackTimer = 90 + Math.random() * 90; 
+    } else {
+        enemy.attackTimer--;
+    }
+
+    // 3. FARM SPAWN
+    // Ekranda max 5 farm olsun
+    if (minions.length < 5 && Math.random() < 0.02) {
+        spawnMinion();
+    }
+
+    // 4. PLAYER PROJECTILES (Q)
+    for (let i = playerProjectiles.length - 1; i >= 0; i--) {
+        const p = playerProjectiles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.distTraveled += MISSILE_SPEED;
+        
+        // Menzil veya sınır kontrolü
+        if (p.distTraveled > MISSILE_RANGE) {
+            playerProjectiles.splice(i, 1);
+            continue;
+        }
+
+        // Minion Vurma Kontrolü
+        let hit = false;
+        for (let m = minions.length - 1; m >= 0; m--) {
+            const minion = minions[m];
+            const dist = Math.hypot(p.x - minion.x, p.y - minion.y);
+            if (dist < MINION_RADIUS + MISSILE_RADIUS) {
+                // VURDUK!
+                minions.splice(m, 1);
+                score++;
+                document.getElementById("score-display").innerText = "Skor (Farm): " + score;
+                hit = true;
+                break;
+            }
+        }
+        
+        if (hit) {
+            playerProjectiles.splice(i, 1);
+        }
+    }
+
+    // 5. ENEMY PROJECTILES (Ahri Q)
+    for (let i = enemyProjectiles.length - 1; i >= 0; i--) {
+        const orb = enemyProjectiles[i];
+        
+        if (orb.state === "out") {
+            // İleri git
+            orb.x += Math.cos(orb.angle) * orb.speed;
+            orb.y += Math.sin(orb.angle) * orb.speed;
+            orb.dist += orb.speed;
+            
+            // Yavaşlama efekti (Sonlara doğru)
+            if (orb.dist > orb.maxDist * 0.8) {
+                orb.speed *= 0.92;
+            }
+
+            if (orb.dist >= orb.maxDist || orb.speed < 0.5) {
+                orb.state = "return";
+            }
+        } else {
+            // Geri dön (Enemy'ye hüdümlü)
+            const dx = enemy.x - orb.x;
+            const dy = enemy.y - orb.y;
+            const distToEnemy = Math.hypot(dx, dy);
+            const returnAngle = Math.atan2(dy, dx);
+            
+            // Hızlanarak dön
+            if (orb.speed < ORB_SPEED_RET) orb.speed += 0.5;
+            
+            orb.x += Math.cos(returnAngle) * orb.speed;
+            orb.y += Math.sin(returnAngle) * orb.speed;
+            
+            // Rakibe ulaştı mı?
+            if (distToEnemy < 30) {
+                enemyProjectiles.splice(i, 1);
+                continue;
+            }
+        }
+
+        // OYUNCUYA ÇARPTI MI? (Dodge Başarısız)
+        const distToPlayer = Math.hypot(orb.x - player.x, orb.y - player.y);
+        if (distToPlayer < PLAYER_RADIUS + ORB_RADIUS - 5) { // -5 hitbox toleransı
+            gameOver("Ahri Q'suna yakalandın!");
+        }
+    }
+}
+
+function gameOver(reason) {
+    gameState = "gameover";
+    const goDiv = document.getElementById("game-over");
+    document.getElementById("go-reason").innerText = reason;
+    document.getElementById("go-score").innerText = "Toplam Skor: " + score;
+    goDiv.style.display = "block";
+}
+
+// ---------------- RENDER ----------------
+function draw() {
+    // Arkaplan temizle
+    ctx.fillStyle = "#111";
+    ctx.fillRect(0, 0, cw, ch);
+
+    // ARENA ÇİZİMİ
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, ARENA_RADIUS, 0, Math.PI * 2);
+    ctx.strokeStyle = "#333";
+    ctx.lineWidth = 5;
+    ctx.stroke();
+    ctx.fillStyle = "#161616";
+    ctx.fill();
+
+    // Grid (Opsiyonel Estetik)
+    ctx.strokeStyle = "#222";
+    ctx.lineWidth = 1;
+    // Basit grid
+    const gridSize = 50;
+    // ... grid çizimi atlandı performans ve sadelik için ...
+
+    // TARGET MARKER (Sağ Tık Yeri)
+    if (gameState === "playing" && Math.hypot(player.tx - player.x, player.ty - player.y) > 5) {
+        ctx.strokeStyle = "#0f0";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(player.tx - 5, player.ty - 5);
+        ctx.lineTo(player.tx + 5, player.ty + 5);
+        ctx.moveTo(player.tx + 5, player.ty - 5);
+        ctx.lineTo(player.tx - 5, player.ty + 5);
+        ctx.stroke();
+    }
+
+    // MINIONS
+    ctx.fillStyle = "#ffd700"; // Altın rengi
+    ctx.strokeStyle = "#b8860b";
+    minions.forEach(m => {
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, m.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        
+        // Can barı (tek vuruş ama görsel olsun)
+        ctx.fillStyle = "red";
+        ctx.fillRect(m.x - 10, m.y - 20, 20, 4);
+    });
+
+    // OYUNCU
+    ctx.fillStyle = "#4f8";
+    ctx.shadowBlur = 10;
+    ctx.shadowColor = "#4f8";
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, PLAYER_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // RAKİP
+    ctx.fillStyle = "#f44";
+    ctx.shadowBlur = 15;
+    ctx.shadowColor = "#f00";
+    ctx.beginPath();
+    ctx.arc(enemy.x, enemy.y, ENEMY_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // PROJECTILES (Player Q)
+    ctx.fillStyle = "#8cf";
+    playerProjectiles.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, MISSILE_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+        // Kuyruk efekti
+        ctx.strokeStyle = "rgba(136, 204, 255, 0.3)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - p.vx * 3, p.y - p.vy * 3);
+        ctx.stroke();
+    });
+
+    // PROJECTILES (Enemy Q - Orb)
+    enemyProjectiles.forEach(orb => {
+        // Orb Core
+        ctx.fillStyle = orb.state === "out" ? "#0af" : "#f0a"; // Giderken Mavi, Dönerken Pembe/Gerçek (Ahri stili)
+        // Ahri Q'su aslında mavidir ama dönerken true damage vurur vs. Biz renk değiştirelim görsel olsun.
+        // Aslında Ahri Q Giderken Mavi, Dönerken de Mavidir ama biz tehlikeyi belli edelim.
+        // User "Ahri Q" dedi, biz klasik mavi yapalım.
+        ctx.fillStyle = "rgba(100, 200, 255, 0.8)";
+        
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = "#0af";
+        ctx.beginPath();
+        ctx.arc(orb.x, orb.y, ORB_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        // Orb Outline
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    });
+
+    requestAnimationFrame(draw);
+}
+
+// Döngü Başlat
+setInterval(update, 1000/60);
+resize();
+requestAnimationFrame(draw);
+
+</script>
+</body>
+</html>
